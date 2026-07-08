@@ -1,0 +1,288 @@
+---
+title: "knn-dt-svm"
+author: "Berat Mert Kayacan"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document:
+    df_print: paged
+---
+
+# Dataset Generation --> student_id=2365718 
+```{r}
+library(class)       # KNN
+library(rpart)       # Decision Tree
+library(rpart.plot)  # Decision Tree Visualization
+library(e1071)       # SVM
+
+
+generate_data <- function(student_id) {
+  set.seed(student_id)
+  n <- 1000
+
+  age                <- round(runif(n, 18, 65))
+  income             <- pmax(rnorm(n, mean=50000, sd=15000), 10000)
+  years_of_education <- round(runif(n, 8, 22))
+  prev_purchases     <- pmin(rpois(n, lambda=3), 10)
+  discount           <- sample(c('yes','no'), n, replace=TRUE, prob=c(0.4, 0.6))
+  free_delivery      <- sample(c('yes','no'), n, replace=TRUE, prob=c(0.3, 0.7))
+  product_price      <- round(runif(n, 10, 500), 2)
+  product_rating     <- round(runif(n, 1, 5), 1)
+
+  income_scaled <- (income - 10000) / 90000
+  prev_scaled   <- prev_purchases / 10
+  edu_scaled    <- (years_of_education - 8) / 14
+  price_norm    <- (product_price - 10) / 490
+  rating_scaled <- (product_rating - 1) / 4
+  disc_bin      <- ifelse(discount=='yes', 1, 0)
+  fd_bin        <- ifelse(free_delivery=='yes', 1, 0)
+
+  logit <- -0.5 + 1.5*income_scaled + 1.2*prev_scaled +
+            0.8*disc_bin + 0.6*fd_bin - 1.0*price_norm +
+            0.7*rating_scaled + 0.4*edu_scaled +
+            rnorm(n, 0, 0.3)
+  prob     <- 1 / (1 + exp(-logit))
+  purchase <- ifelse(runif(n) < prob, 'yes', 'no')
+
+  data.frame(Age=age, Income=round(income,2),
+             YearsOfEducation=years_of_education,
+             PreviousPurchases=prev_purchases,
+             DiscountOffered=discount, FreeDelivery=free_delivery,
+             ProductPrice=product_price, ProductRating=product_rating,
+             Purchase=purchase)
+}
+data <- generate_data(student_id = 2365718)
+head(data)
+```
+
+
+# 0. Preprocessing
+```{r}
+# DiscountOffered, FreeDelivery, Purchase değişkenleri encoding (1/0'a çevir) 
+data$DiscountOffered <- ifelse(data$DiscountOffered == "yes", 1, 0)
+data$FreeDelivery    <- ifelse(data$FreeDelivery == "yes", 1, 0)
+data$Purchase <- as.factor(data$Purchase)   # 0=not purchase 1=purchase
+str(data) 
+
+# Training-test %80-%20 böl
+set.seed(2365718)
+train_index <- sample(1:nrow(data), 0.8 * nrow(data))
+train_data  <- data[train_index, ]
+test_data   <- data[-train_index, ]
+
+# Sınıf dağılımı tablo
+tablo <- table(data$Purchase)
+cat("\nPurchase sayıları:\n")
+cat("0 (Satın almadı)   :", tablo[1], "\n")
+cat("1 (Satın aldı)     :", tablo[2], "\n")
+cat("Purchase Yes Oranı :", round(tablo[2]/sum(tablo)*100, 1),"%")
+```
+
+
+# 1. K-Nearest Neighbors (KNN)
+```{r}
+# feature: X ve label: Y
+egitim_X <- train_data[, 1:8]
+test_X   <- test_data[, 1:8]
+egitim_Y <- train_data$Purchase   
+test_Y   <- test_data$Purchase
+
+# Normalization (sadece eğitimden öğren)
+ort <- apply(egitim_X, 2, mean)
+std <- apply(egitim_X, 2, sd)
+egitim_X <- scale(egitim_X, center = ort, scale = std)
+test_X   <- scale(test_X,   center = ort, scale = std)
+
+# En iyi k değeri - accuracy'e göre 
+accuracy <- numeric(35)
+for (i in 1:35) {
+  tahmin <- knn(egitim_X, test_X, egitim_Y, k = i)
+  accuracy[i] <- mean(tahmin == test_Y) * 100
+  cat("k =", i, " accuracy yüzdesi:", round(accuracy[i], 2), "%\n")
+}
+
+# Visualization (grafik ile k bulma)
+plot(accuracy, type = "b", 
+     xlab = "k degeri", 
+     ylab = "Accuracy (%)", 
+     main = "KNN - k bazli accuracy grafigi")
+
+# max accuracy 73.5 % ---> k=27 seçtik
+k_final   <- 27 
+knn_final <- knn(egitim_X, test_X, egitim_Y, k = k_final)
+cat("Final accuracy değeri:", mean(knn_final == test_Y),"\nFinal k = 27")
+```
+
+
+# 2. Decision Tree (DT)
+```{r}
+# 1,2,3,5,7,10 için maxdepth
+derinlikler <- c(1, 2, 3, 5, 7, 10)
+dt_acc      <- numeric(length(derinlikler))
+
+for (j in 1:length(derinlikler)) {
+  agac <- rpart(Purchase ~ ., data = train_data, method = "class",
+                control = rpart.control(maxdepth = derinlikler[j], cp = 0))
+  tahmin    <- predict(agac, test_data, type = "class")
+  dt_acc[j] <- mean(tahmin == test_data$Purchase) * 100
+  cat("maxdepth =", derinlikler[j], " accuracy:", round(dt_acc[j], 2), "%\n")
+}
+
+# maxdepth = 3 ile final_agac 
+secilen_derinlik <- 3 
+final_agac <- rpart(Purchase ~ ., data = train_data, method = "class",
+                    control = rpart.control(maxdepth = secilen_derinlik, cp = 0))
+
+rpart.plot(final_agac, type = 2, fallen.leaves = TRUE) # rpart.plot ile görselleştirme
+
+# Final accuracy
+final_tahmin <- predict(final_agac, test_data, type = "class")
+cat(sprintf("Seçilen derinlik = %d | accuracy: %.2f%%\n", secilen_derinlik, mean(final_tahmin == test_data$Purchase)*100))
+
+
+```
+
+
+
+# 3. Support Vector Machine (SVM)
+```{r}
+maliyetler <- c(0.01, 0.1, 1, 10, 100, 1000) # 6 değer için cost 
+svm_acc    <- numeric(length(maliyetler))
+
+for (j in 1:length(maliyetler)) {
+  model <- svm(Purchase ~ ., data = train_data,
+               type   = "C-classification",
+               kernel = "radial",
+               cost   = maliyetler[j])
+  tahmin     <- predict(model, test_data)
+  svm_acc[j] <- mean(tahmin == test_data$Purchase) * 100
+  cat("cost =", maliyetler[j], " accuracy:", round(svm_acc[j], 2), "%\n")
+}
+
+#DataFrame ile bakalım 
+sonuc_tablo <- data.frame(Cost = maliyetler, Accuracy = round(svm_acc, 2))
+print(sonuc_tablo)
+
+# Görselleştirme(cost geniş aralıkta log ile rahat)
+plot(maliyetler, svm_acc, type = "b", log = "x",
+     xlab = "Cost", ylab = "Accuracy (%)",
+     main = "SVM: cost'a gore test accuracy")
+
+
+#final cost = 1 max accuracy(72.5%) bulundu 
+final_cost <- 1    
+svm_final  <- svm(Purchase ~ ., data = train_data,
+                  type = "C-classification", kernel = "radial",
+                  cost = final_cost)
+
+svm_tahmin <- predict(svm_final, test_data)
+
+table(Tahmin = svm_tahmin, Gercek = test_data$Purchase) #confusion matrix
+cat(sprintf("\nFinal cost = %g | accuracy: %.2f%%\n", final_cost, mean(svm_tahmin == test_data$Purchase)*100))
+```
+
+
+
+
+
+
+# Problem Tanımı
+
+Analiz amacı müşteri ve ürün bilgilerini kullanarak bir müşterinin
+ürünü satın alıp almayacağını (Purchase = yes/no) tahmin etmektir. Binary yani yes no gibi ikili bir sınıflandırma problemidir. Veri seti öğrenci numaram 2365718 buna göre seed olarak olarak kullanılarak üretilmiş 1000 gözlem ve 8 feature'dan oluşmaktadır:
+Age, Income, YearsOfEducation, PreviousPurchases, DiscountOffered,
+FreeDelivery, ProductPrice ve ProductRating. Hedef değişkenin (Purchase-tahmin edilmek istenen değişkenin) sınıf dağılımı dataframe ile bakılınca dengesiz olduğu net: 729 yes (%72.9) ve 271 no (%27.1). Bu dengesizlik önemlidir çünkü trainden öğrenmeyip hepsine yes atayan bir model bile test setinde
+yaklaşık %72 doğruluk elde eder. Bu yüzden modelleri değerlendirirken bu
+%72'lik taban çizgisini referans almak önemliydi buna dikkat ettim.
+
+# Çözüm Metodolojisi
+
+## Preprocessing
+
+Veri üretildikten sonra DiscountOffered ve FreeDelivery değişkenlerini 0/1 olacak şekilde sayısal değerlere çevirdim encoding yapılma sebebi KNN'de mesafe hesabı için featureların kategorik değil sayısal olması gerekli olduğundan.
+Hedef değişken Purchase'ı ise factor olarak tanımladım, çünkü Decision Tree ve
+SVM için hedefin factor olmasını ister. Datayı %80 training ve %20 test olacak şekilde böldüm ayrıca ise set.seed(2365718) ile tekrar üretilebilirlik sağlanmış oldu.
+
+## K-Nearest Neighbors (KNN)
+
+KNN mesafe temelli bir yöntem olduğu için önce özelliklere standartization uyguladım (scale). Bunun nedeni, Income 50000.00 gibi bir sayı değeri alırken, ProductRating 1 ile 5 arası değerler alıyordu günün sonunda değişkenlerin ölçekleri çok farklıydı. Ölçeklemezsek Income tek başına
+mesafeyi belirlerdi. 
+Ölçek parametrelerini yalnızca eğitim setinden öğrenip testi dışarıda bırakarak hem eğitime hem teste uygulamasını sağladım bunun sebebi de test verisinden bilgi sızmasını önlemek içindi.
+
+Final k değerini seçmek için ise k = 1'den 35'e kadar tüm değerlerin accuracy skoruna bakarak denedim ve her biri için test doğruluğunu hesaplayıp grafikten de kontrol ettim ve gösterdim. Başlangıç referansı olarak sqrt(N) ≈ 31.6 kuralını kullandım. Grafiğe göre en yüksek accuracy skoru (%73.5) k = 27'de elde edildi. 
+k = 27'yi seçtim çünkü: ilk olarak en yüksek doğruluğu
+veriyor, ikinci olarak tek sayı olduğu için binary classificatinda oylama berabere kalmamış oluyor. Çok küçük k (1–3) değerlerinden kaçındım çünkü bunlar outlier'lara aşırı duyarlıdır overfitting riski.
+
+## Decision Tree (DT)
+
+Karar ağacı için rpart paketini kullandım ve ölçeklenmemiş orijinal veriyi
+verdim. Maxdepth değerini 1, 2, 3, 5, 7, 10 olarak değiştirip her biri için test accuracy değerini kontrol ettim ve şu şekilde çıktı:
+
+| maxdepth | Test Accuracy |
+|:--------:|:-------------:|
+| 1        | 72.0%         |
+| 2        | 72.0%         |
+| 3        | 72.0%         |
+| 5        | 63.0%         |
+| 7        | 61.0%         |
+| 10       | 65.0%         |
+
+Bunun sonucunda şu sonuca ulaştım: doğruluk(accuracy) derinlik 1–3 arasında en yüksek (%72) kalıyor, derinlik arttıkça düşüyor. 
+Final derinlik olarak maxdepth = 3'ü seçtim: maksimum doğruluğun
+korunduğu en büyük derinlik olduğu için. Seçilen derinliğin ağacını rpart.plot ile görselleştirdim.
+
+**what it means when a tree is very deep. Is a deeper tree always better?**
+Çok derin bir ağaç, eğitim verisindeki her detayı (outliers dahil) ezberler. Bu sebeple eğitimde yüksek doğruluk verse de test setinde veride başarısız
+olur yani overfitting olabilir. Sonuçlarımda da derinlik 3'ten sonra test
+doğruluğu düştü. Dolayısıyla daha derin ağaç her zaman daha iyi değildir. Belirli bir noktadan sonra model genelleme yeteneğini kaybeder.
+
+## Support Vector Machine (SVM)
+
+SVM için e1071 paketini, C-classification türünü ve radial çekirdeği
+kullandım. svm() sayısal değişkenleri kendi içinde otomatik ölçeklediği için
+veriyi doğrudan verdim. En az 5 farklı cost değeri (0.01, 0.1, 1, 10, 100,
+1000) denedim:
+
+| Cost | Test Accuracy |
+|:----:|:-------------:|
+| 0.01 | 72.0%         |
+| 0.1  | 72.0%         |
+| 1    | 72.5%         |
+| 10   | 65.0%         |
+| 100  | 66.0%         |
+| 1000 | 62.5%         |
+
+Final cost değeri olarak 1'i seçtim çünkü en yüksek test doğruluğu (%72.5) bu cost değeri verdi ve orta bir değer olduğu için underfitting ile overfitting arasındaki dengeyi sağlamış oldu.
+
+**What happens to model performance when the cost is very high versus very low.** 
+Çok düşük cost (0.01–0.1) modeli fazla rahat yapar denebilir. Patterni yeterince öğrenemez yani underfitting ve doğruluk taban çizgisinde (%72) takılır. 
+Çok yüksek cost (10–1000) ise modeli eğitim verisini ezberlemeye zorlar overfitting ve test doğruluğu düşer %62.5'a kadar düşmüş bizim durumumuzda. 
+En iyi performans ikisinin arasındaki orta değer olan cost = 1'de elde edilir.
+
+# Comparison
+
+| Yöntem        | Seçilen Parametre | Test Accuracy |
+|:--------------|:-----------------:|:-------------:|
+| KNN           | k = 27            | 73.5%         |
+| Karar Ağacı   | maxdepth = 3      | 72.0%         |
+| SVM           | cost = 1          | 72.5%         |
+
+Üç yöntem birbirine çok yakın sonuç verdi ve hepsi %72'lik taban çizgisinin yakınında kümelendi. En iyi performansı %73.5'luk accuracy değeri ile KNN gösterdi;
+taban çizgisini gözle görülür biçimde geçen tek yöntem KNN. SVM %72.5 ile  ikinci, Decision Tree %72.0 ile taban çizgisiyle aynı sonucu verdi.
+
+Bu sonuçların ana nedeni, hedef değişken üretilirken eklenen rastgele gürültü. Features ile Purchase arasındaki ilişkiyi büyük ölçüde maskeliyor. SVM'in karışıklık matrisinde model 56 gerçek "no" örneğinin yalnızca 5'ini doğru tahmin etti; yani çoğunlukla "yes" dedi. 
+Decision Tree de benzer şekilde taban çizgisini aşamadı. KNN'in hafif üstünlüğü, yerel komşuluk yapısını kullanarak bazı "no" örneklerini yakalayabilmesinden kaynaklanıyor olabilir.
+
+
+
+
+
+
+# Conclusion
+
+Bu çalışmada müşteri satın alma (Purchase değişkeninin) davranışını tahmin etmek için KNN, Decision Tree ve SVM yöntemlerini kendi bireysel veri setime uyguladım. 
+Veri seti %72.9 oranında dengesiz olduğu için %72'lik bir taban çizgisi oluştu. Üç model de bu taban çizgisinin yakınında kaldı; en iyi sonucu k = 27 ile KNN %73.5 verdi.
+KNN'de 1-35 arası değerlerine bakmanın yanında accuracy grafiğiyle k seçiminde grafiği de kontrol ettim ve görselleştirdim.
+Decision Tree'de farklı maxdepth değerlerini karşılaştırarak overfitting başlamadan önceki en iyi derinliği 3 olarak belirledim.
+SVM'de cost değerlerine bakarak en iyi cost değerini cost = 1 olarak buldum. Genel bulgu, bu veride özelliklerin Purchase'ı güçlü biçimde ayırmaya yetmediği ve modellerin çoğunluk sınıfına yöneldiğidir. Yine de KNN, yerel yapıyı kullanarak taban çizgisini geçen tek yöntem olarak öne çıktı denebilir.
+
